@@ -7,7 +7,8 @@ RUN dotnet restore "./RadarChollos.csproj"
 COPY . .
 RUN dotnet publish "RadarChollos.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
-FROM mcr.microsoft.com/dotnet/runtime:9.0 AS final
+# Etapa final de ejecución (con soporte ASP.NET Core)
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
 
