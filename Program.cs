@@ -1,4 +1,7 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using RadarChollos.Data;
@@ -22,7 +25,7 @@ try
 {
     Log.Information("Arrancando RadarChollos...");
 
-    var builder = Host.CreateApplicationBuilder(args);
+    var builder = WebApplication.CreateBuilder(args);
     builder.Services.AddSerilog();
 
     Directory.CreateDirectory("db");
@@ -57,9 +60,16 @@ try
     builder.Services.AddSingleton<ITelegramHandlerService, TelegramHandlerService>();
     builder.Services.AddHostedService<RadarWorker>();
 
-    var host = builder.Build();
+    // Render asigna el puerto mediante la variable de entorno PORT (por defecto 10000)
+    string port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-    using (var scope = host.Services.CreateScope())
+    var app = builder.Build();
+
+    // Endpoint de comprobación de estado para Render y el monitor de pings
+    app.MapGet("/", () => Results.Ok(new { status = "healthy", app = "RadarChollos" }));
+
+    using (var scope = app.Services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Database.EnsureCreatedAsync();
@@ -77,7 +87,7 @@ try
     }
 
     Log.Information("Servicio en ejecucion. Presiona Ctrl+C para detener.");
-    await host.RunAsync();
+    await app.RunAsync();
 }
 catch (Exception ex)
 {
