@@ -64,8 +64,9 @@ try
 
     var app = builder.Build();
 
-    app.MapGet("/", () => Results.Ok(new { status = "healthy", app = "RadarChollos" }));
-    app.MapGet("/health", () => Results.Ok(new { status = "healthy", time = DateTime.UtcNow }));
+    // Permite peticiones GET y HEAD en ambos endpoints para UptimeRobot y Render
+    app.MapMethods("/", ["GET", "HEAD"], () => Results.Ok(new { status = "healthy", app = "RadarChollos" }));
+    app.MapMethods("/health", ["GET", "HEAD"], () => Results.Ok(new { status = "healthy", time = DateTime.UtcNow }));
 
     using (var scope = app.Services.CreateScope())
     {
