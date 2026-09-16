@@ -6,6 +6,7 @@ using RadarChollos.Data;
 using RadarChollos.Models;
 using RadarChollos.Services;
 using Telegram.Bot;
+using Telegram.Bot.Polling;
 
 namespace RadarChollos.Workers;
 
@@ -40,13 +41,29 @@ public class RadarWorker : BackgroundService
     {
         _logger.LogInformation("RadarWorker listo y escuchando eventos de Telegram.");
 
+        var receiverOptions = new ReceiverOptions
+        {
+            AllowedUpdates = []
+        };
+
         _botClient.StartReceiving(
-            updateHandler: (cli, update, ct) => _telegramHandler.HandleUpdateAsync(update, ct),
+            updateHandler: async (cli, update, ct) =>
+            {
+                try
+                {
+                    await _telegramHandler.HandleUpdateAsync(update, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[Telegram] Error procesando comando de usuario.");
+                }
+            },
             errorHandler: (cli, ex, ct) =>
             {
-                _logger.LogWarning("Telegram API: {Mensaje}", ex.Message);
+                _logger.LogWarning("Telegram API Polling: {Mensaje}", ex.Message);
                 return Task.CompletedTask;
             },
+            receiverOptions: receiverOptions,
             cancellationToken: stoppingToken
         );
 
