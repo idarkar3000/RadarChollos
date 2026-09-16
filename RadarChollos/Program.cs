@@ -5,7 +5,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using RadarChollos.Data;
-using RadarChollos.Models;
 using RadarChollos.Services;
 using RadarChollos.Workers;
 using Serilog;
@@ -60,30 +59,19 @@ try
     builder.Services.AddSingleton<ITelegramHandlerService, TelegramHandlerService>();
     builder.Services.AddHostedService<RadarWorker>();
 
-    // Render asigna el puerto mediante la variable de entorno PORT (por defecto 10000)
-    string port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+    string port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
     builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
     var app = builder.Build();
 
-    // Endpoint de comprobación de estado para Render y el monitor de pings
     app.MapGet("/", () => Results.Ok(new { status = "healthy", app = "RadarChollos" }));
+    app.MapGet("/health", () => Results.Ok(new { status = "healthy", time = DateTime.UtcNow }));
 
     using (var scope = app.Services.CreateScope())
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Database.EnsureCreatedAsync();
-
-        if (!await db.Productos.AnyAsync())
-        {
-            db.Productos.AddRange(
-                new Producto { Patron = "ps5 - digital - funda", PrecioMaximo = 450m },
-                new Producto { Patron = "taladro + bosch", PrecioMaximo = 80m },
-                new Producto { Patron = "minecraft + switch", PrecioMaximo = 25m, TiendaFiltro = "amazon" }
-            );
-            await db.SaveChangesAsync();
-            Log.Information("Base de datos lista: añadidas 3 reglas iniciales.");
-        }
+        Log.Information("Base de datos verificada y lista para su uso.");
     }
 
     Log.Information("Servicio en ejecucion. Presiona Ctrl+C para detener.");

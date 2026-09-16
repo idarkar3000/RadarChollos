@@ -7,77 +7,70 @@ using RadarChollos.Models;
 using RadarChollos.Services;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
+using Telegram.Bot.Types;
 
 namespace RadarChollos.Workers;
 
 public class RadarWorker : BackgroundService
 {
-    private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IChollometroService _chollometroService;
-    private readonly ITelegramHandlerService _telegramHandler;
     private readonly ITelegramBotClient _botClient;
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ITelegramHandlerService _telegramHandler;
+    private readonly IChollometroService _chollometroService;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<RadarWorker> _logger;
 
-    private DateTime _ultimaLimpiezaDb = DateTime.MinValue;
-
     public RadarWorker(
-        IServiceScopeFactory scopeFactory,
-        IChollometroService chollometroService,
-        ITelegramHandlerService telegramHandler,
         ITelegramBotClient botClient,
-        IHttpClientFactory httpClientFactory,
+        ITelegramHandlerService telegramHandler,
+        IChollometroService chollometroService,
+        IServiceScopeFactory scopeFactory,
         ILogger<RadarWorker> logger)
     {
-        _scopeFactory = scopeFactory;
-        _chollometroService = chollometroService;
-        _telegramHandler = telegramHandler;
         _botClient = botClient;
-        _httpClientFactory = httpClientFactory;
+        _telegramHandler = telegramHandler;
+        _chollometroService = chollometroService;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("RadarWorker listo y escuchando eventos de Telegram.");
+        _ = Task.Run(() => IniciarListenerTelegramConReintentoAsync(stoppingToken), stoppingToken);
 
-        var receiverOptions = new ReceiverOptions
-        {
-            AllowedUpdates = []
-        };
-
-        _botClient.StartReceiving(
-            updateHandler: async (cli, update, ct) =>
-            {
-                try
-                {
-                    await _telegramHandler.HandleUpdateAsync(update, ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "[Telegram] Error procesando comando de usuario.");
-                }
-            },
-            errorHandler: (cli, ex, ct) =>
-            {
-                _logger.LogWarning("Telegram API Polling: {Mensaje}", ex.Message);
-                return Task.CompletedTask;
-            },
-            receiverOptions: receiverOptions,
-            cancellationToken: stoppingToken
-        );
-
-        // Primera comprobacion inmediata al arrancar
-        await ProcesarRondaAsync(stoppingToken);
-
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
-
-        while (!stoppingToken.IsCancellationRequested && await timer.WaitForNextTickAsync(stoppingToken))
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ProcesarRondaAsync(stoppingToken);
-                await LimpiarHistoricoAntiguoAsync(stoppingToken);
+                await ProcesarRondaFeedAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[Ronda] Error evaluando feed de ofertas");
+            }
+
+            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+        }
+    }
+
+    private async Task IniciarListenerTelegramConReintentoAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                _logger.LogInformation("[Telegram] Listener activo y escuchando eventos");
+
+                var receiverOptions = new ReceiverOptions
+                {
+                    AllowedUpdates = []
+                };
+
+                await _botClient.ReceiveAsync(
+                    updateHandler: ManejarUpdateAsync,
+                    errorHandler: ManejarErrorPollingAsync,
+                    receiverOptions: receiverOptions,
+                    cancellationToken: stoppingToken
+                );
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -85,164 +78,94 @@ public class RadarWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Excepcion no controlada en ciclo de escaneo.");
+                _logger.LogWarning(ex, "[Telegram] Conexión interrumpida. Reconectando en 10 segundos...");
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
             }
         }
-
-        _logger.LogInformation("RadarWorker finalizado correctamente.");
     }
 
-    private async Task ProcesarRondaAsync(CancellationToken ct)
+    private Task ManejarErrorPollingAsync(ITelegramBotClient bot, Exception exception, CancellationToken ct)
+    {
+        _logger.LogWarning("[Telegram API Error] {Mensaje}", exception.Message);
+        return Task.CompletedTask;
+    }
+
+    private async Task ManejarUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
+    {
+        try
+        {
+            await _telegramHandler.HandleUpdateAsync(update, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Telegram] Error procesando comando");
+        }
+    }
+
+    private async Task ProcesarRondaFeedAsync(CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
-        var reglas = await db.Productos.ToListAsync(ct);
-        if (!reglas.Any())
+        var productos = await db.Productos.ToListAsync(ct);
+        if (productos.Count == 0)
         {
             _logger.LogInformation("[Ronda] Sin alertas activas registradas.");
             return;
         }
 
-        var todasLasOfertas = await _chollometroService.ObtenerOfertasAsync(ct);
-        if (!todasLasOfertas.Any())
+        var ofertas = await _chollometroService.ObtenerOfertasAsync(ct);
+        int notificados = 0;
+
+        foreach (var oferta in ofertas)
         {
-            _logger.LogWarning("[Ronda] No se obtuvieron ofertas en el feed RSS.");
-            return;
-        }
+            if (oferta.EstaExpirado || string.IsNullOrWhiteSpace(oferta.Enlace))
+                continue;
 
-        int chollosNotificados = 0;
+            bool yaExiste = await db.Chollos.AnyAsync(c => c.Enlace == oferta.Enlace, ct);
+            if (yaExiste)
+                continue;
 
-        foreach (var regla in reglas)
-        {
-            var ofertasCoincidentes = todasLasOfertas
-                .Where(o => !o.EstaExpirado && _chollometroService.CumplePatron(o.Titulo, regla.Patron) && o.Precio.HasValue)
-                .ToList();
-
-            if (!string.IsNullOrEmpty(regla.TiendaFiltro))
+            foreach (var producto in productos)
             {
-                ofertasCoincidentes = ofertasCoincidentes
-                    .Where(o => o.Tienda != null && o.Tienda.Contains(regla.TiendaFiltro, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-            }
+                if (!_chollometroService.CumplePatron(oferta.Titulo, producto.Patron))
+                    continue;
 
-            if (!ofertasCoincidentes.Any()) continue;
+                if (producto.PrecioMaximo.HasValue && oferta.Precio.HasValue && oferta.Precio.Value > producto.PrecioMaximo.Value)
+                    continue;
 
-            var enlacesVivos = ofertasCoincidentes.Select(o => o.Enlace).ToHashSet();
-            var chollosGuardadosVivos = await db.Chollos
-                .Where(c => c.ProductoId == regla.Id && c.Precio.HasValue && enlacesVivos.Contains(c.Enlace))
-                .ToListAsync(ct);
+                if (!string.IsNullOrWhiteSpace(producto.TiendaFiltro) &&
+                    !string.Equals(oferta.Tienda, producto.TiendaFiltro, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-            decimal? sueloDinamico = chollosGuardadosVivos.Any()
-                ? chollosGuardadosVivos.Min(c => c.Precio!.Value)
-                : regla.PrecioMaximo;
-
-            var candidatos = new List<OfertaFeed>();
-            foreach (var oferta in ofertasCoincidentes)
-            {
-                string enlaceLimpio = oferta.Enlace.Split('?')[0];
-                string tituloLimpio = oferta.Titulo.Trim().ToLowerInvariant();
-
-                bool yaNotificado = await db.Chollos.AnyAsync(c =>
-                    c.Enlace.StartsWith(enlaceLimpio) ||
-                    (c.Titulo.ToLower() == tituloLimpio && c.FechaDeteccion >= DateTime.UtcNow.AddHours(-24)),
-                    ct);
-
-                if (yaNotificado) continue;
-
-                if (!sueloDinamico.HasValue || oferta.Precio!.Value <= sueloDinamico.Value)
+                var nuevoChollo = new Chollo
                 {
-                    candidatos.Add(oferta);
-                }
-            }
+                    Titulo = oferta.Titulo,
+                    Enlace = oferta.Enlace,
+                    Precio = oferta.Precio,
+                    Tienda = oferta.Tienda,
+                    ProductoId = producto.Id,
+                    FechaDeteccion = DateTime.UtcNow
+                };
 
-            var mejorCandidato = candidatos.OrderBy(c => c.Precio).FirstOrDefault();
-
-            if (mejorCandidato != null)
-            {
-                _logger.LogInformation(">> MATCH [{Patron}]: {Titulo} -> {Precio}€ ({Tienda})",
-                    regla.Patron, mejorCandidato.Titulo, mejorCandidato.Precio, mejorCandidato.Tienda ?? "Web");
-
-                string urlFinal = await ResolverRedireccionFinalAsync(mejorCandidato.EnlaceDirecto, ct);
+                db.Chollos.Add(nuevoChollo);
+                await db.SaveChangesAsync(ct);
 
                 await _telegramHandler.EnviarAlertaCholloAsync(
-                    mejorCandidato.Titulo,
-                    mejorCandidato.Precio,
-                    mejorCandidato.Tienda,
-                    urlFinal,
-                    sueloDinamico,
+                    oferta.Titulo,
+                    oferta.Precio,
+                    oferta.Tienda,
+                    oferta.EnlaceDirecto,
+                    null,
                     ct
                 );
 
-                db.Chollos.Add(new Chollo
-                {
-                    Titulo = mejorCandidato.Titulo,
-                    Enlace = mejorCandidato.Enlace,
-                    Precio = mejorCandidato.Precio,
-                    Tienda = mejorCandidato.Tienda,
-                    ProductoId = regla.Id,
-                    FechaDeteccion = DateTime.UtcNow
-                });
-
-                await db.SaveChangesAsync(ct);
-                chollosNotificados++;
+                notificados++;
+                break;
             }
         }
 
-        _logger.LogInformation("[Ronda] Feed analizado: {Total} ofertas leidas | {Reglas} reglas evaluadas | {Enviados} notificados.",
-            todasLasOfertas.Count, reglas.Count, chollosNotificados);
-    }
-
-    private async Task<string> ResolverRedireccionFinalAsync(string urlOriginal, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(urlOriginal) || !urlOriginal.Contains("chollometro.com"))
-        {
-            return urlOriginal;
-        }
-
-        try
-        {
-            var client = _httpClientFactory.CreateClient("RedirectResolverClient");
-            using var request = new HttpRequestMessage(HttpMethod.Get, urlOriginal);
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-
-            if (response.Headers.Location != null)
-            {
-                return response.Headers.Location.ToString();
-            }
-        }
-        catch
-        {
-            // Falla silenciosa: si falla la redirección, se entrega la URL original del feed
-        }
-
-        return urlOriginal;
-    }
-
-    private async Task LimpiarHistoricoAntiguoAsync(CancellationToken ct)
-    {
-        if (DateTime.UtcNow - _ultimaLimpiezaDb < TimeSpan.FromHours(24)) return;
-
-        try
-        {
-            using var scope = _scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-            var fechaLimite = DateTime.UtcNow.AddDays(-30);
-            int borrados = await db.Chollos
-                .Where(c => c.FechaDeteccion < fechaLimite)
-                .ExecuteDeleteAsync(ct);
-
-            if (borrados > 0)
-            {
-                _logger.LogInformation("[Mantenimiento] Depurados {Total} chollos de mas de 30 dias.", borrados);
-            }
-
-            _ultimaLimpiezaDb = DateTime.UtcNow;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[Mantenimiento] Error al purgar registros antiguos.");
-        }
+        _logger.LogInformation("[Ronda] Feed analizado: {Total} ofertas leidas | {Reglas} reglas evaluadas | {Notificados} notificados.",
+            ofertas.Count, productos.Count, notificados);
     }
 }

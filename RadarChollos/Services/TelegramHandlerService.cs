@@ -120,8 +120,10 @@ public class TelegramHandlerService : ITelegramHandlerService
 
         if (mensajeTexto.StartsWith("/remove ", StringComparison.OrdinalIgnoreCase) ||
             mensajeTexto.StartsWith("/del ", StringComparison.OrdinalIgnoreCase) ||
+            mensajeTexto.StartsWith("/delete ", StringComparison.OrdinalIgnoreCase) ||
             mensajeTexto.Equals("/remove", StringComparison.OrdinalIgnoreCase) ||
-            mensajeTexto.Equals("/del", StringComparison.OrdinalIgnoreCase))
+            mensajeTexto.Equals("/del", StringComparison.OrdinalIgnoreCase) ||
+            mensajeTexto.Equals("/delete", StringComparison.OrdinalIgnoreCase))
         {
             await ProcesarRemoveAsync(mensajeTexto, remitenteId, db, ct);
             return;
@@ -138,7 +140,7 @@ public class TelegramHandlerService : ITelegramHandlerService
     {
         string ayuda = "<b>Comandos disponibles:</b>\n\n" +
                        "• <code>/list</code> : Lista las alertas activas.\n" +
-                       "• <code>/remove &lt;id&gt;</code> : Elimina una alerta por ID.\n" +
+                       "• <code>/delete &lt;id&gt;</code> : Elimina una alerta por ID.\n" +
                        "• <code>/add &lt;patron&gt;</code> : Registra un nuevo patron.\n\n" +
                        "<b>Formatos admitidos:</b>\n" +
                        "• <code>/add ps5 &lt; 450</code>\n" +
@@ -188,21 +190,38 @@ public class TelegramHandlerService : ITelegramHandlerService
         string patronPositivo = partesMenos[0];
         var exclusiones = partesMenos.Skip(1).Where(e => !string.IsNullOrWhiteSpace(e)).ToList();
 
+        // Obtener el menor ID libre para reutilizar huecos eliminados
+        var idsExistentes = await db.Productos.Select(p => p.Id).OrderBy(id => id).ToListAsync(ct);
+        int nuevoId = 1;
+        foreach (var id in idsExistentes)
+        {
+            if (id == nuevoId)
+            {
+                nuevoId++;
+            }
+            else if (id > nuevoId)
+            {
+                break;
+            }
+        }
+
         var nuevoProducto = new Producto
         {
+            Id = nuevoId,
             Patron = patronRestante.Trim(),
             PrecioMaximo = precioMax,
-            TiendaFiltro = tiendaFiltro
+            TiendaFiltro = tiendaFiltro,
+            FechaCreacion = DateTime.UtcNow
         };
 
         db.Productos.Add(nuevoProducto);
         await db.SaveChangesAsync(ct);
 
-        _logger.LogInformation("[Telegram] Nueva alerta creada: '{Patron}' (Max: {Max}€ | Tienda: {Tienda})",
-            nuevoProducto.Patron, precioMax?.ToString() ?? "N/A", tiendaFiltro ?? "Cualquiera");
+        _logger.LogInformation("[Telegram] Nueva alerta creada: ID {Id} '{Patron}' (Max: {Max}€ | Tienda: {Tienda})",
+            nuevoProducto.Id, nuevoProducto.Patron, precioMax?.ToString() ?? "N/A", tiendaFiltro ?? "Cualquiera");
 
         var respuesta = new StringBuilder();
-        respuesta.AppendLine("<b>Alerta registrada:</b>");
+        respuesta.AppendLine($"<b>Alerta registrada (ID: {nuevoProducto.Id}):</b>");
         respuesta.AppendLine($"• <b>Patron:</b> <code>{System.Net.WebUtility.HtmlEncode(patronPositivo)}</code>");
 
         if (exclusiones.Any())
@@ -224,7 +243,7 @@ public class TelegramHandlerService : ITelegramHandlerService
 
         if (partes.Length < 2 || !int.TryParse(partes[1], out int productoId))
         {
-            await _bot.SendMessage(chatId: chatId, text: "Uso: <code>/remove &lt;id&gt;</code>", parseMode: ParseMode.Html, cancellationToken: ct);
+            await _bot.SendMessage(chatId: chatId, text: "Uso: <code>/delete &lt;id&gt;</code>", parseMode: ParseMode.Html, cancellationToken: ct);
             return;
         }
 
@@ -245,7 +264,7 @@ public class TelegramHandlerService : ITelegramHandlerService
 
     private async Task ProcesarListAsync(long chatId, AppDbContext db, CancellationToken ct)
     {
-        var productos = await db.Productos.ToListAsync(ct);
+        var productos = await db.Productos.OrderBy(p => p.Id).ToListAsync(ct);
         if (!productos.Any())
         {
             await _bot.SendMessage(chatId: chatId, text: "No hay alertas configuradas.", cancellationToken: ct);
