@@ -26,3 +26,6 @@ db/
 logs/
 **/logs/
 *.txt
+
+**/Properties/launchSettings.json
+launchSettings.json
