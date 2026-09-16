@@ -38,17 +38,20 @@ public class RadarWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("RadarChollos Worker iniciado correctamente.");
+        _logger.LogInformation("RadarWorker listo y escuchando eventos de Telegram.");
 
         _botClient.StartReceiving(
             updateHandler: (cli, update, ct) => _telegramHandler.HandleUpdateAsync(update, ct),
             errorHandler: (cli, ex, ct) =>
             {
-                _logger.LogError(ex, "Error recibido desde la API de Telegram.");
+                _logger.LogWarning("Telegram API: {Mensaje}", ex.Message);
                 return Task.CompletedTask;
             },
             cancellationToken: stoppingToken
         );
+
+        // Primera comprobacion inmediata al arrancar
+        await ProcesarRondaAsync(stoppingToken);
 
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
 
@@ -65,33 +68,33 @@ public class RadarWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error no controlado durante la ronda de monitorización.");
+                _logger.LogError(ex, "Excepcion no controlada en ciclo de escaneo.");
             }
         }
 
-        _logger.LogInformation("RadarChollos Worker detenido de forma segura (Graceful Shutdown).");
+        _logger.LogInformation("RadarWorker finalizado correctamente.");
     }
 
     private async Task ProcesarRondaAsync(CancellationToken ct)
     {
-        _logger.LogInformation("Iniciando ronda de sondeo del feed oficial...");
-
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         var reglas = await db.Productos.ToListAsync(ct);
         if (!reglas.Any())
         {
-            _logger.LogDebug("No hay reglas activas configuradas.");
+            _logger.LogInformation("[Ronda] Sin alertas activas registradas.");
             return;
         }
 
         var todasLasOfertas = await _chollometroService.ObtenerOfertasAsync(ct);
         if (!todasLasOfertas.Any())
         {
-            _logger.LogWarning("No se recibieron ofertas del feed en esta pasada.");
+            _logger.LogWarning("[Ronda] No se obtuvieron ofertas en el feed RSS.");
             return;
         }
+
+        int chollosNotificados = 0;
 
         foreach (var regla in reglas)
         {
@@ -130,19 +133,7 @@ public class RadarWorker : BackgroundService
 
                 if (yaNotificado) continue;
 
-                if (sueloDinamico.HasValue)
-                {
-                    if (oferta.Precio!.Value <= sueloDinamico.Value)
-                    {
-                        candidatos.Add(oferta);
-                    }
-                    else
-                    {
-                        _logger.LogDebug("Descartado por precio: {Titulo} ({Precio}€ > {Suelo}€)",
-                            oferta.Titulo, oferta.Precio, sueloDinamico);
-                    }
-                }
-                else
+                if (!sueloDinamico.HasValue || oferta.Precio!.Value <= sueloDinamico.Value)
                 {
                     candidatos.Add(oferta);
                 }
@@ -152,8 +143,8 @@ public class RadarWorker : BackgroundService
 
             if (mejorCandidato != null)
             {
-                _logger.LogInformation("¡Chollo detectado para '{Patron}'! {Titulo} - {Precio}€ en {Tienda}",
-                    regla.Patron, mejorCandidato.Titulo, mejorCandidato.Precio, mejorCandidato.Tienda ?? "Desconocida");
+                _logger.LogInformation(">> MATCH [{Patron}]: {Titulo} -> {Precio}€ ({Tienda})",
+                    regla.Patron, mejorCandidato.Titulo, mejorCandidato.Precio, mejorCandidato.Tienda ?? "Web");
 
                 string urlFinal = await ResolverRedireccionFinalAsync(mejorCandidato.EnlaceDirecto, ct);
 
@@ -177,8 +168,12 @@ public class RadarWorker : BackgroundService
                 });
 
                 await db.SaveChangesAsync(ct);
+                chollosNotificados++;
             }
         }
+
+        _logger.LogInformation("[Ronda] Feed analizado: {Total} ofertas leidas | {Reglas} reglas evaluadas | {Enviados} notificados.",
+            todasLasOfertas.Count, reglas.Count, chollosNotificados);
     }
 
     private async Task<string> ResolverRedireccionFinalAsync(string urlOriginal, CancellationToken ct)
@@ -199,9 +194,9 @@ public class RadarWorker : BackgroundService
                 return response.Headers.Location.ToString();
             }
         }
-        catch (Exception ex)
+        catch
         {
-            _logger.LogDebug(ex, "No se pudo resolver redirección para {Url}. Usando URL de salto.", urlOriginal);
+            // Falla silenciosa: si falla la redirección, se entrega la URL original del feed
         }
 
         return urlOriginal;
@@ -223,14 +218,14 @@ public class RadarWorker : BackgroundService
 
             if (borrados > 0)
             {
-                _logger.LogInformation("Mantenimiento: Se eliminaron {Cantidad} chollos antiguos de la base de datos.", borrados);
+                _logger.LogInformation("[Mantenimiento] Depurados {Total} chollos de mas de 30 dias.", borrados);
             }
 
             _ultimaLimpiezaDb = DateTime.UtcNow;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Error durante el mantenimiento de purga en la base de datos.");
+            _logger.LogWarning(ex, "[Mantenimiento] Error al purgar registros antiguos.");
         }
     }
 }

@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using RadarChollos.Data;
@@ -17,17 +18,23 @@ public class TelegramHandlerService : ITelegramHandlerService
     private readonly ITelegramBotClient _bot;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelegramHandlerService> _logger;
-
-    private const long MiChatId = 6553492134;
+    private readonly long _allowedChatId;
 
     public TelegramHandlerService(
         ITelegramBotClient bot,
         IServiceScopeFactory scopeFactory,
+        IConfiguration configuration,
         ILogger<TelegramHandlerService> logger)
     {
         _bot = bot;
         _scopeFactory = scopeFactory;
         _logger = logger;
+
+        string chatIdRaw = Environment.GetEnvironmentVariable("TELEGRAM_ALLOWED_CHAT_ID")
+            ?? configuration["TelegramAllowedChatId"]
+            ?? "0";
+
+        long.TryParse(chatIdRaw, out _allowedChatId);
     }
 
     public async Task EnviarAlertaCholloAsync(
@@ -38,26 +45,26 @@ public class TelegramHandlerService : ITelegramHandlerService
         decimal? precioAnterior,
         CancellationToken ct)
     {
-        string textoPrecio = precio.HasValue ? $"{precio.Value:0.00}€" : "No detectado";
-        string textoTienda = !string.IsNullOrWhiteSpace(tienda) ? tienda : "Desconocida / Chollometro";
+        string textoPrecio = precio.HasValue ? $"{precio.Value:0.00}€" : "N/D";
+        string textoTienda = !string.IsNullOrWhiteSpace(tienda) ? tienda : "Chollometro";
 
         string detalleBajada = (precioAnterior.HasValue && precio.HasValue && precio.Value < precioAnterior.Value)
-            ? $"\n📉 <b>¡Nuevo suelo activo!</b> (Mejor anterior: <s>{precioAnterior.Value:0.00}€</s>)"
+            ? $"\n📉 <b>Precio minimo superado</b> (Anterior: <s>{precioAnterior.Value:0.00}€</s>)"
             : "";
 
         var sb = new StringBuilder();
-        sb.AppendLine("🚨 <b>¡CHOLLO DETECTADO!</b>");
+        sb.AppendLine("🚨 <b>Alerta de Chollo</b>");
         if (!string.IsNullOrEmpty(detalleBajada)) sb.AppendLine(detalleBajada);
         sb.AppendLine();
         sb.AppendLine($"📦 <b>Producto:</b> {System.Net.WebUtility.HtmlEncode(titulo)}");
         sb.AppendLine($"🏪 <b>Tienda:</b> <code>{System.Net.WebUtility.HtmlEncode(textoTienda)}</code>");
         sb.AppendLine($"💰 <b>Precio:</b> <b>{textoPrecio}</b>");
         sb.AppendLine();
-        sb.AppendLine($"🔗 <a href=\"{enlace}\">Ver oferta directamente</a>");
+        sb.AppendLine($"🔗 <a href=\"{enlace}\">Enlace a la oferta</a>");
 
         string etiquetaBoton = !string.IsNullOrWhiteSpace(tienda) && !tienda.Contains("Chollometro", StringComparison.OrdinalIgnoreCase)
-            ? $"🛒 Ir a la oferta en {tienda}"
-            : "🛒 Ir a la oferta en la tienda";
+            ? $"Ver en {tienda}"
+            : "Ver oferta";
 
         var teclado = new InlineKeyboardMarkup(new List<List<InlineKeyboardButton>>
         {
@@ -70,7 +77,7 @@ public class TelegramHandlerService : ITelegramHandlerService
         try
         {
             await _bot.SendMessage(
-                chatId: MiChatId,
+                chatId: _allowedChatId,
                 text: sb.ToString(),
                 parseMode: ParseMode.Html,
                 replyMarkup: teclado,
@@ -79,7 +86,7 @@ public class TelegramHandlerService : ITelegramHandlerService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error al enviar la alerta de chollo a Telegram.");
+            _logger.LogError(ex, "Error al enviar mensaje a Telegram.");
         }
     }
 
@@ -88,13 +95,11 @@ public class TelegramHandlerService : ITelegramHandlerService
         if (update.Message?.Text is not { } mensajeTexto) return;
         long remitenteId = update.Message.Chat.Id;
 
-        if (remitenteId != MiChatId)
+        if (_allowedChatId != 0 && remitenteId != _allowedChatId)
         {
-            _logger.LogWarning("Acceso no autorizado bloqueado para el ID: {ChatId}", remitenteId);
+            _logger.LogWarning("Acceso rechazado para ChatId no autorizado: {ChatId}", remitenteId);
             return;
         }
-
-        _logger.LogInformation("Comando recibido en Telegram: {Texto}", mensajeTexto);
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -131,11 +136,11 @@ public class TelegramHandlerService : ITelegramHandlerService
 
     private async Task EnviarAyudaAsync(long chatId, CancellationToken ct)
     {
-        string ayuda = "🤖 <b>Comandos disponibles en RadarChollos:</b>\n\n" +
-                       "• <code>/list</code> : Muestra todas las alertas activas.\n" +
-                       "• <code>/remove &lt;id&gt;</code> : Elimina una alerta por su ID.\n" +
-                       "• <code>/add &lt;patrón&gt;</code> : Crea una nueva regla de monitorización.\n\n" +
-                       "<b>Ejemplos para /add:</b>\n" +
+        string ayuda = "<b>Comandos disponibles:</b>\n\n" +
+                       "• <code>/list</code> : Lista las alertas activas.\n" +
+                       "• <code>/remove &lt;id&gt;</code> : Elimina una alerta por ID.\n" +
+                       "• <code>/add &lt;patron&gt;</code> : Registra un nuevo patron.\n\n" +
+                       "<b>Formatos admitidos:</b>\n" +
                        "• <code>/add ps5 &lt; 450</code>\n" +
                        "• <code>/add switch + zelda &lt; 45</code>\n" +
                        "• <code>/add monitor + msi - curvo &lt; 180</code>\n" +
@@ -150,14 +155,7 @@ public class TelegramHandlerService : ITelegramHandlerService
 
         if (string.IsNullOrWhiteSpace(entrada) || entrada.Length < 3)
         {
-            string ayuda = "⚠️ <b>Formato incorrecto para /add</b>\n\n" +
-                           "Ejemplos admitidos:\n" +
-                           "• <code>/add ps5</code>\n" +
-                           "• <code>/add switch + zelda &lt; 45</code>\n" +
-                           "• <code>/add monitor + msi - curvo &lt; 180</code>\n" +
-                           "• <code>/add rtx 4070 @ amazon &lt; 550</code>\n";
-
-            await _bot.SendMessage(chatId: chatId, text: ayuda, parseMode: ParseMode.Html, cancellationToken: ct);
+            await _bot.SendMessage(chatId: chatId, text: "Uso: <code>/add &lt;patron&gt; [&lt; precio] [@ tienda]</code>", parseMode: ParseMode.Html, cancellationToken: ct);
             return;
         }
 
@@ -200,20 +198,22 @@ public class TelegramHandlerService : ITelegramHandlerService
         db.Productos.Add(nuevoProducto);
         await db.SaveChangesAsync(ct);
 
+        _logger.LogInformation("[Telegram] Nueva alerta creada: '{Patron}' (Max: {Max}€ | Tienda: {Tienda})",
+            nuevoProducto.Patron, precioMax?.ToString() ?? "N/A", tiendaFiltro ?? "Cualquiera");
+
         var respuesta = new StringBuilder();
-        respuesta.AppendLine("✅ <b>¡Alerta configurada con éxito!</b>");
-        respuesta.AppendLine();
-        respuesta.AppendLine($"📦 <b>Búsqueda:</b> <code>{System.Net.WebUtility.HtmlEncode(patronPositivo)}</code>");
+        respuesta.AppendLine("<b>Alerta registrada:</b>");
+        respuesta.AppendLine($"• <b>Patron:</b> <code>{System.Net.WebUtility.HtmlEncode(patronPositivo)}</code>");
 
         if (exclusiones.Any())
-            respuesta.AppendLine($"🚫 <b>Exclusiones:</b> <code>{System.Net.WebUtility.HtmlEncode(string.Join(", ", exclusiones))}</code>");
+            respuesta.AppendLine($"• <b>Exclusiones:</b> <code>{System.Net.WebUtility.HtmlEncode(string.Join(", ", exclusiones))}</code>");
 
         if (!string.IsNullOrEmpty(tiendaFiltro))
-            respuesta.AppendLine($"🏪 <b>Tienda fija:</b> <code>{System.Net.WebUtility.HtmlEncode(tiendaFiltro)}</code>");
+            respuesta.AppendLine($"• <b>Tienda:</b> <code>{System.Net.WebUtility.HtmlEncode(tiendaFiltro)}</code>");
 
         respuesta.AppendLine(precioMax.HasValue
-            ? $"💰 <b>Precio Máximo:</b> <code>{precioMax.Value:0.00}€</code>"
-            : "💰 <b>Precio Máximo:</b> <code>Sin límite</code>");
+            ? $"• <b>Precio limite:</b> <code>{precioMax.Value:0.00}€</code>"
+            : "• <b>Precio limite:</b> <code>Ninguno</code>");
 
         await _bot.SendMessage(chatId: chatId, text: respuesta.ToString(), parseMode: ParseMode.Html, cancellationToken: ct);
     }
@@ -224,21 +224,23 @@ public class TelegramHandlerService : ITelegramHandlerService
 
         if (partes.Length < 2 || !int.TryParse(partes[1], out int productoId))
         {
-            await _bot.SendMessage(chatId: chatId, text: "⚠️ Indica el ID numérico de la alerta a eliminar. Ejemplo: <code>/remove 3</code>", parseMode: ParseMode.Html, cancellationToken: ct);
+            await _bot.SendMessage(chatId: chatId, text: "Uso: <code>/remove &lt;id&gt;</code>", parseMode: ParseMode.Html, cancellationToken: ct);
             return;
         }
 
         var producto = await db.Productos.FindAsync([productoId], ct);
         if (producto == null)
         {
-            await _bot.SendMessage(chatId: chatId, text: $"❌ No se encontró ninguna alerta con el ID <code>{productoId}</code>.", parseMode: ParseMode.Html, cancellationToken: ct);
+            await _bot.SendMessage(chatId: chatId, text: $"No se encontro la alerta con ID <code>{productoId}</code>.", parseMode: ParseMode.Html, cancellationToken: ct);
             return;
         }
 
         db.Productos.Remove(producto);
         await db.SaveChangesAsync(ct);
 
-        await _bot.SendMessage(chatId: chatId, text: $"🗑️ <b>Alerta eliminada:</b> <code>(ID: {producto.Id})</code> {System.Net.WebUtility.HtmlEncode(producto.Patron)}", parseMode: ParseMode.Html, cancellationToken: ct);
+        _logger.LogInformation("[Telegram] Alerta eliminada: ID {Id} ('{Patron}')", producto.Id, producto.Patron);
+
+        await _bot.SendMessage(chatId: chatId, text: $"Alerta eliminada: <code>(ID: {producto.Id})</code> {System.Net.WebUtility.HtmlEncode(producto.Patron)}", parseMode: ParseMode.Html, cancellationToken: ct);
     }
 
     private async Task ProcesarListAsync(long chatId, AppDbContext db, CancellationToken ct)
@@ -246,20 +248,20 @@ public class TelegramHandlerService : ITelegramHandlerService
         var productos = await db.Productos.ToListAsync(ct);
         if (!productos.Any())
         {
-            await _bot.SendMessage(chatId: chatId, text: "📭 No tienes alertas activas.", cancellationToken: ct);
+            await _bot.SendMessage(chatId: chatId, text: "No hay alertas configuradas.", cancellationToken: ct);
             return;
         }
 
         var lineas = productos.Select(p =>
         {
-            string precio = p.PrecioMaximo.HasValue ? $"&lt;= {p.PrecioMaximo.Value:0.00}€" : "Sin límite";
+            string precio = p.PrecioMaximo.HasValue ? $"&lt;= {p.PrecioMaximo.Value:0.00}€" : "Sin limite";
             string tienda = !string.IsNullOrEmpty(p.TiendaFiltro) ? $" | @{p.TiendaFiltro}" : "";
-            return $"• <code>(ID: {p.Id})</code> <b>{System.Net.WebUtility.HtmlEncode(p.Patron)}</b> ({precio}{tienda})";
+            return $"• <code>[{p.Id}]</code> <b>{System.Net.WebUtility.HtmlEncode(p.Patron)}</b> ({precio}{tienda})";
         });
 
         await _bot.SendMessage(
             chatId: chatId,
-            text: "📋 <b>Alertas activas configuradas:</b>\n\n" + string.Join("\n", lineas),
+            text: "<b>Alertas activas:</b>\n\n" + string.Join("\n", lineas),
             parseMode: ParseMode.Html,
             cancellationToken: ct
         );

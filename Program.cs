@@ -6,17 +6,21 @@ using RadarChollos.Models;
 using RadarChollos.Services;
 using RadarChollos.Workers;
 using Serilog;
+using Serilog.Events;
 using Telegram.Bot;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+    .MinimumLevel.Override("Microsoft.EntityFrameworkCore", LogEventLevel.Warning)
+    .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
     .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
     .WriteTo.File("logs/radar-.txt", rollingInterval: RollingInterval.Day)
     .CreateLogger();
 
 try
 {
-    Log.Information("Iniciando RadarChollos Host...");
+    Log.Information("Arrancando RadarChollos...");
 
     var builder = Host.CreateApplicationBuilder(args);
     builder.Services.AddSerilog();
@@ -49,7 +53,6 @@ try
         ?? throw new InvalidOperationException("Falta la variable de entorno TELEGRAM_BOT_TOKEN.");
 
     builder.Services.AddSingleton<ITelegramBotClient>(new TelegramBotClient(botToken));
-
     builder.Services.AddSingleton<IChollometroService, ChollometroService>();
     builder.Services.AddSingleton<ITelegramHandlerService, TelegramHandlerService>();
     builder.Services.AddHostedService<RadarWorker>();
@@ -69,15 +72,16 @@ try
                 new Producto { Patron = "minecraft + switch", PrecioMaximo = 25m, TiendaFiltro = "amazon" }
             );
             await db.SaveChangesAsync();
-            Log.Information("Base de datos inicializada con alertas de prueba predeterminadas.");
+            Log.Information("Base de datos lista: añadidas 3 reglas iniciales.");
         }
     }
 
+    Log.Information("Servicio en ejecucion. Presiona Ctrl+C para detener.");
     await host.RunAsync();
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, "La aplicación terminó inesperadamente debido a una excepción no controlada.");
+    Log.Fatal(ex, "Error critico al iniciar el host.");
 }
 finally
 {
