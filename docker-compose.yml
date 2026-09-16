@@ -1,0 +1,14 @@
+﻿services:
+  radar-chollos:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: radar_chollos_bot
+    restart: unless-stopped
+    volumes:
+      - ./db:/app/db
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - DOTNET_ENVIRONMENT=Production
