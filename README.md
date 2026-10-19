@@ -1,65 +1,77 @@
-# RadarChollos 📡🏷️
+# RadarChollos
 
-RadarChollos es un servicio backend desarrollado en **C# sobre .NET 9** enfocado en la automatización del rastreo de ofertas y la notificación inmediata mediante Telegram. El sistema resuelve el problema del seguimiento manual de productos consumiendo periódicamente las publicaciones de Chollometro, evaluando criterios de filtrado personalizados y enviando alertas directas a un usuario específico.
+Bot de Telegram en .NET que revisa el feed de Chollometro cada minuto y avisa cuando aparece una oferta que coincide con alguna de las alertas configuradas.
 
-La aplicación opera mediante un proceso de fondo continuo implementado con `IHostedService`, complementado por un servidor web ligero construido con el SDK de ASP.NET Core. Esta combinación permite que el motor de búsqueda trabaje de forma ininterrumpida mientras expone una ruta HTTP básica que responde con el estado de salud del sistema, requisito indispensable para su despliegue y validación en plataformas cloud.
+## Estructura del Repositorio
 
-El filtrado de datos se gestiona a través de un motor interno de reglas almacenadas en una base de datos SQLite mediante Entity Framework Core. Cada regla permite definir palabras clave obligatorias, términos excluidos, límites de precio y normalización de comercios habituales como Amazon, PcComponentes o MediaMarkt. Durante cada ciclo de ejecución, el servicio descarga el feed, descarta ofertas duplicadas o que no cumplan los criterios técnicos establecidos y genera mensajes interactivos con enlaces directos hacia el comercio final.
+- `RadarChollos/`: Proyecto principal en .NET (worker de fondo + bot de Telegram).
+- `tests/RadarChollos.Tests/`: Pruebas unitarias con xUnit.
 
-Toda la interacción con el bot se realiza desde el propio chat de Telegram. El usuario dispone de comandos para listar los filtros activos, registrar nuevas búsquedas y borrar reglas obsoletas en caliente, sin necesidad de reiniciar el proceso ni alterar archivos de configuración. El comando /start o /help muestra las instrucciones de uso y el formato de los filtros. El comando /list devuelve la lista de reglas almacenadas junto con el identificador único de cada una. El comando /add permite registrar una nueva regla especificando términos clave, exclusiones precedidas por un signo menos, precio máximo opcional y tienda objetivo precedida por una arroba, como por ejemplo /add rtx 4070 -ti 550 @pccomponentes. El comando /delete seguido del número identificador elimina esa regla de la base de datos de manera definitiva. La API de Telegram se maneja de forma asíncrona mediante la librería oficial Telegram.Bot, restringiendo la ejecución de comandos a un identificador de usuario verificado para evitar accesos no autorizados.
+## Tecnologías
 
-Para el despliegue se utiliza una compilación multi-etapa con Docker. En la primera fase se emplea la imagen del SDK para restaurar paquetes NuGet y compilar los binarios del proyecto. En la fase final se trasladan únicamente los archivos compilados a una imagen base de ASP.NET Core en Linux, reduciendo el tamaño total del contenedor y el consumo de recursos en memoria.
+- **Lenguaje:** C# (.NET 9)
+- **Base de datos:** SQLite con Entity Framework Core
+- **Mensajería:** Telegram.Bot
+- **Feed:** RSS de Chollometro (System.ServiceModel.Syndication)
+- **Logging:** Serilog
+- **Despliegue:** Docker en Render, con UptimeRobot para evitar la suspensión por inactividad
 
-El servicio corre alojado en Render bajo una instancia web gratuita. Para evitar la suspensión automática por inactividad tras periodos sin tráfico entrante, el sistema está enlazado a UptimeRobot, que realiza una petición de comprobación cada cinco minutos sobre el puerto expuesto. Las credenciales sensibles, como el token del bot y el identificador de chat permitido, se gestionan íntegramente mediante variables de entorno del sistema, impidiendo la exposición de secretos en el control de versiones de Git.
+## Estructura del Proyecto
 
----
+- `Endpoints/`: Rutas HTTP del servicio (`HealthEndpoints`).
+- `Models/`: Entidades de dominio (`Chollo`, `Producto`).
+- `Repositories/`: Capa de datos con EF Core (`AppDbContext`).
+- `Services/`: Lógica de parsing y del bot (`ChollometroService`, `TelegramHandlerService`).
+- `Workers/`: Proceso en segundo plano (`RadarWorker`).
 
-## 🏗️ Arquitectura y Tecnologías
+## Cómo funciona
 
-* **C# / .NET 9:** Runtime y lenguaje base del sistema.
-* **Worker continuo (`IHostedService`):** Proceso en segundo plano desacoplado para ejecución periódica.
-* **Entity Framework Core & SQLite:** Persistencia local para gestión de reglas y deduplicación.
-* **Telegram.Bot:** Cliente asíncrono para recepción de comandos y envío de alertas.
-* **xUnit & FluentAssertions:** Batería automatizada de pruebas unitarias.
-* **Docker & Render:** Contenerización multi-stage y alojamiento en la nube con keep-alive vía UptimeRobot.
+1. `RadarWorker` consulta el RSS de Chollometro cada minuto.
+2. Cada oferta se compara con las alertas guardadas (patrón, precio máximo y tienda).
+3. Si es nueva y coincide, se guarda en la base de datos y se envía un mensaje a Telegram con botón directo a la tienda.
 
----
+## Comandos de Telegram
 
-## 💬 Comandos de Telegram
+Los comandos se procesan en caliente, sin reiniciar el servicio:
 
-El bot procesa los comandos en caliente sin reiniciar el servicio:
+- `/start` o `/help`: Muestra las instrucciones de uso.
+- `/list`: Lista las alertas activas con su `ID`.
+- `/add`: Crea una nueva alerta. Ejemplo: `/add rtx 4070 @ amazon < 550`
+  - `+` obliga a que estén todos los términos, `|` basta con uno, `-` excluye.
+  - `<` marca el precio máximo y `@` la tienda.
+- `/delete`: Elimina una alerta por su ID. Ejemplo: `/delete 3`
 
-* `/start` o `/help`: Muestra las instrucciones de uso y el formato de los filtros.
-* `/list`: Devuelve la lista de reglas activas junto con el identificador único (`ID`) de cada una.
-* `/add`: Registra una nueva regla indicando palabras clave, términos excluidos con `-`, precio máximo con `<` y tienda con `@`. Ejemplo: `/add rtx 4070 -ti 550 <800 @pccomponentes`
-* `/delete`: Elimina de forma definitiva la regla asociada al número identificador. Ejemplo: `/delete 3`
+Solo responde al chat configurado en `TELEGRAM_ALLOWED_CHAT_ID`.
 
----
+## Pruebas
 
-## 🧪 Pruebas Unitarias
+```bash
+dotnet test
+```
 
-La suite de pruebas en el proyecto `RadarChollos.Tests` cubre los dos componentes críticos del bot:
+Están en `tests/RadarChollos.Tests` y cubren el motor de coincidencia de patrones (`MatchingRuleTests`) y el parser del comando `/add` (`CommandParserTests`).
 
-* Comando de ejecución en terminal: `dotnet test`
-* **Matching Engine (`MatchingRuleTests.cs`):** Valida la inclusión de palabras clave, el descarte por términos excluidos (`-`), los topes de precio y la normalización de comercios (`@`).
-* **Command Parser (`CommandParserTests.cs`):** Valida la interpretación sintáctica de `/add` y `/delete`, los parámetros opcionales y la gestión de entradas inválidas.
+## Configuración y Ejecución
 
----
+### Variables de entorno
 
-## 🚀 Puesta en Marcha Local y Despliegue
+Copia `.env.example` a `.env` en la raíz del repositorio:
 
-### Variables de entorno (.env)
+```
+TELEGRAM_BOT_TOKEN=tu_token_aqui
+TELEGRAM_ALLOWED_CHAT_ID=tu_chat_id_aqui
+```
 
-Crea un archivo llamado `.env` en la raíz tomando como referencia `.env.example` con los siguientes parámetros:
+El token lo da BotFather y el chat id se puede obtener hablándole al bot `@userinfobot`.
 
-* `TELEGRAM_BOT_TOKEN`: Token obtenido a través de BotFather.
-* `ALLOWED_CHAT_ID`: Identificador numérico de tu usuario de Telegram.
-* `CHECK_INTERVAL_SECONDS`: Frecuencia de escaneo en segundos (por defecto 60).
+### Comandos
 
-### Comandos de ejecución
+```bash
+dotnet restore
+dotnet build
+dotnet run --project RadarChollos
+dotnet test
+docker compose up --build -d
+```
 
-* Restaurar dependencias: `dotnet restore`
-* Compilar solución: `dotnet build`
-* Ejecutar bot en local: `dotnet run --project RadarChollos`
-* Ejecutar tests unitarios: `dotnet test`
-* Levantar mediante Docker Compose: `docker compose up --build -d`
+El servicio escucha en el puerto `10000` (o el que indique la variable `PORT`) y responde en `/health` para las comprobaciones de Render y UptimeRobot.

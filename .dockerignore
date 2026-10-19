@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/node_modules/
+**/dist/
+**/appsettings*.json
+.git/
+.vs/
+*.user
+db/
+logs/
+tests/
+README.md
+LICENSE

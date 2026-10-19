@@ -4,7 +4,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using RadarChollos.Data;
+using RadarChollos.Endpoints;
+using RadarChollos.Repositories;
 using RadarChollos.Services;
 using RadarChollos.Workers;
 using Serilog;
@@ -64,9 +65,7 @@ try
 
     var app = builder.Build();
 
-    // Permite peticiones GET y HEAD en ambos endpoints para UptimeRobot y Render
-    app.MapMethods("/", ["GET", "HEAD"], () => Results.Ok(new { status = "healthy", app = "RadarChollos" }));
-    app.MapMethods("/health", ["GET", "HEAD"], () => Results.Ok(new { status = "healthy", time = DateTime.UtcNow }));
+    app.MapHealthEndpoints();
 
     using (var scope = app.Services.CreateScope())
     {

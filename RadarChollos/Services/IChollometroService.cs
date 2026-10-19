@@ -1,41 +1,26 @@
-﻿namespace RadarChollos.Services;
-
-/// <summary>
-/// Representa una oferta procesada del feed RSS con sus metadatos limpios.
-/// </summary>
-public record OfertaFeed(
-    string Titulo,
-    string Enlace,
-    string EnlaceDirecto,
-    decimal? Precio,
-    string? Tienda,
-    bool EstaExpirado
-);
-
-public interface IChollometroService
+﻿namespace RadarChollos.Services
 {
-    /// <summary>
-    /// Descarga y parsea el feed oficial de Chollometro en segundo plano de forma asíncrona y resiliente.
-    /// </summary>
-    Task<List<OfertaFeed>> ObtenerOfertasAsync(CancellationToken ct);
+    // Oferta leída del feed RSS de Chollometro ya limpia
+    public record OfertaFeed(
+        string Titulo,
+        string Enlace,
+        string EnlaceDirecto,
+        decimal? Precio,
+        string? Tienda,
+        bool EstaExpirado
+    );
 
-    /// <summary>
-    /// Evalúa si el título cumple la regla lógica (+, |, -, paréntesis, sin tildes).
-    /// </summary>
-    bool CumplePatron(string titulo, string patron);
+    public interface IChollometroService
+    {
+        Task<List<OfertaFeed>> ObtenerOfertasAsync(CancellationToken ct);
 
-    /// <summary>
-    /// Extrae el precio en euros del texto mediante expresiones regulares.
-    /// </summary>
-    decimal? ExtraerPrecio(string texto);
+        // Evalúa el patrón lógico (+, |, -, paréntesis) contra el título de la oferta
+        bool CumplePatron(string titulo, string patron);
 
-    /// <summary>
-    /// Identifica comercios conocidos (Amazon, MediaMarkt, El Corte Inglés, etc.) a partir del título, descripción o URL.
-    /// </summary>
-    string? ExtraerTienda(string titulo, string? summary, string? enlace);
+        decimal? ExtraerPrecio(string texto);
 
-    /// <summary>
-    /// Extrae la URL de salida externa directa o la ruta de salto oficial desde el contenido del feed.
-    /// </summary>
-    string ExtraerEnlaceDirecto(string enlaceChollometro, string? summary);
+        string? ExtraerTienda(string titulo, string? summary, string? enlace);
+
+        string ExtraerEnlaceDirecto(string enlaceChollometro, string? summary);
+    }
 }
